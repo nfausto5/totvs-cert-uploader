@@ -1,0 +1,8 @@
+{
+  "login_url": "https://tec.totvshospitalidade.com/",
+  "username": "seu-email@empresa.com.br",
+  "password": "",
+  "headless": false,
+  "persist_session": false,
+  "timeout_ms": 30000
+}

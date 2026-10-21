@@ -1,0 +1,20 @@
+# Ambientes virtuais e cache Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Build / PyInstaller
+build/
+dist/
+*.spec
+
+# Dados sensíveis locais e sessão de navegador
+config.json
+.browser_profile/
+*.pfx
+*.p12
+*.cer
+*.crt
+*.key
