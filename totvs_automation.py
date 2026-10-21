@@ -1,11 +1,28 @@
+import os
 import re
+import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Callable, Optional
 
 from playwright.sync_api import BrowserContext, FrameLocator, Page, TimeoutError as PlaywrightTimeoutError, sync_playwright
 
-from config import AppConfig, BASE_DIR
+from config import AppConfig
+
+# Evita que o processo node.exe do driver do Playwright pisque janela de console no Windows
+if sys.platform == "win32":
+    _orig_popen = subprocess.Popen
+
+    class _NoWindowPopen(_orig_popen):
+        def __init__(self, *args, **kwargs):
+            if "creationflags" not in kwargs:
+                kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
+            else:
+                kwargs["creationflags"] |= subprocess.CREATE_NO_WINDOW
+            super().__init__(*args, **kwargs)
+
+    subprocess.Popen = _NoWindowPopen  # type: ignore[misc]
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -29,7 +46,6 @@ class TotvsCertUploader:
     def __init__(self, config: AppConfig, log_callback: Optional[Callable[[str], None]] = None):
         self.config = config
         self.log_cb = log_callback or (lambda msg: None)
-        self.user_data_dir = BASE_DIR / ".browser_profile"
 
     def log(self, message: str) -> None:
         self.log_cb(message)
@@ -38,7 +54,7 @@ class TotvsCertUploader:
         return page.frame_locator("iframe[src*='acesso.totvshospitalidade.com']")
 
     def _dismiss_popups(self, page: Page) -> None:
-        """Fecha alertas de senhas salvas ou alerta de segurança da conta ('Fechar' / 'Entendi')."""
+        """Fecha silenciosamente alertas de senhas salvas ou alerta de segurança ('Fechar' / 'Entendi')."""
         auth_frame = self._get_auth_frame(page)
         frame_selectors = [
             "identity-mfa-warning-modal button:has-text('Entendi')",
@@ -52,10 +68,8 @@ class TotvsCertUploader:
             try:
                 loc = auth_frame.locator(sel).first
                 if loc.is_visible(timeout=250):
-                    txt = (loc.inner_text() or "Entendi/Fechar").strip()
                     loc.click(timeout=1500)
-                    self.log(f"Alerta fechado automaticamente ({txt}).")
-                    page.wait_for_timeout(500)
+                    page.wait_for_timeout(400)
             except Exception:
                 pass
 
@@ -69,48 +83,33 @@ class TotvsCertUploader:
             try:
                 loc = page.locator(sel).first
                 if loc.is_visible(timeout=200):
-                    txt = (loc.inner_text() or "Entendi/Fechar").strip()
                     loc.click(timeout=1500)
-                    self.log(f"Aviso fechado automaticamente ({txt}).")
-                    page.wait_for_timeout(400)
+                    page.wait_for_timeout(350)
             except Exception:
                 pass
 
     def _ensure_logged_in_and_on_tenant_screen(self, page: Page) -> None:
-        # Navega pela raiz https://tec.totvshospitalidade.com/ (que redireciona para /auth/login sem erro S3/CloudFront)
         base_url = "https://tec.totvshospitalidade.com/"
-        self.log(f"Acessando plataforma TOTVS ({base_url})...")
+        self.log("Conectando ao servidor centralizador em segundo plano...")
         page.goto(base_url, wait_until="domcontentloaded", timeout=self.config.timeout_ms)
         page.wait_for_timeout(4000)
         self._dismiss_popups(page)
 
         auth_frame = self._get_auth_frame(page)
 
-        # Caso uma sessão persistente caia direto no /home de uma empresa anterior, volta para /auth/tenant via roteador SPA
-        if "/home" in page.url or "/general" in page.url:
-            self.log("Voltando para a seleção de empresas (/auth/tenant)...")
-            page.evaluate(
-                "window.history.pushState({}, '', '/auth/tenant'); window.dispatchEvent(new PopStateEvent('popstate'));"
-            )
-            page.wait_for_timeout(2500)
-            self._dismiss_popups(page)
-
-        # Verifica se já está na tela de seleção de empresa (input.po-search-input dentro do iframe)
         search_input = auth_frame.locator("input.po-search-input").first
-        if search_input.is_visible(timeout=2000):
-            self.log("Sessão já autenticada na tela de seleção de empresas.")
+        if search_input.is_visible(timeout=1500):
             self._dismiss_popups(page)
             return
 
-        # Preenche login dentro do iframe acesso.totvshospitalidade.com
-        self.log(f"Realizando login com '{self.config.username}'...")
+        self.log("Autenticando sessão segura...")
         user_input = auth_frame.locator("input[type='text'], input[type='email']").first
         pwd_input = auth_frame.locator("input[type='password']").first
 
         try:
             user_input.wait_for(state="visible", timeout=self.config.timeout_ms)
         except PlaywrightTimeoutError as exc:
-            raise TotvsAutomationError("Não foi possível carregar o formulário de login da TOTVS.") from exc
+            raise TotvsAutomationError("Não foi possível conectar ao serviço de autenticação.") from exc
 
         self._dismiss_popups(page)
         user_input.fill(self.config.username)
@@ -119,8 +118,6 @@ class TotvsCertUploader:
         entrar_btn = auth_frame.get_by_role("button", name="Entrar", exact=True)
         entrar_btn.click()
 
-        # Aguarda carregar a tela de seleção de empresas (input.po-search-input) e fecha o alerta "Entendi"
-        self.log("Aguardando painel de empresas e verificando alertas de segurança...")
         deadline = time.time() + (self.config.timeout_ms / 1000.0)
         while time.time() < deadline:
             self._dismiss_popups(page)
@@ -130,17 +127,17 @@ class TotvsCertUploader:
             if err.is_visible(timeout=200):
                 err_txt = (err.inner_text() or "").strip()
                 if err_txt and any(w in err_txt.lower() for w in ("inválid", "incorret", "erro", "usuário", "senha")):
-                    raise TotvsAutomationError(f"Falha no login TOTVS: {err_txt}")
+                    raise TotvsAutomationError(f"Falha na autenticação do servidor: {err_txt}")
             page.wait_for_timeout(500)
         else:
-            raise TotvsAutomationError("Tempo esgotado aguardando a lista de empresas após o login.")
+            raise TotvsAutomationError("Tempo esgotado aguardando resposta do painel de empresas.")
 
         page.wait_for_timeout(1200)
         self._dismiss_popups(page)
 
     def _search_and_access_company(self, page: Page, cnpj: str) -> None:
         cnpj_formatted = format_cnpj(cnpj)
-        self.log(f"Pesquisando empresa pelo CNPJ: {cnpj_formatted} ...")
+        self.log(f"Localizando cadastro da empresa ({cnpj_formatted})...")
 
         self._dismiss_popups(page)
         auth_frame = self._get_auth_frame(page)
@@ -149,7 +146,7 @@ class TotvsCertUploader:
         try:
             search_input.wait_for(state="visible", timeout=self.config.timeout_ms)
         except PlaywrightTimeoutError as exc:
-            raise TotvsAutomationError("Campo 'Pesquisar' não encontrado na tela de empresas.") from exc
+            raise TotvsAutomationError("Campo de pesquisa de empresa não disponível.") from exc
 
         self._dismiss_popups(page)
         search_input.click()
@@ -170,23 +167,22 @@ class TotvsCertUploader:
         count = acessar_btns.count()
         if count == 0 or (cnpj_formatted not in frame_text and count > 1):
             raise TotvsAutomationError(
-                f"Nenhuma empresa encontrada no painel para o CNPJ {cnpj_formatted}."
+                f"Empresa com CNPJ {cnpj_formatted} não localizada na plataforma."
             )
 
-        self.log("Empresa localizada no painel! Clicando em 'Acessar'...")
+        self.log("Empresa localizada! Acessando painel da empresa...")
         acessar_btns.first.click()
 
-        # Aguarda carregar o menu lateral da empresa no frame principal
         try:
             page.wait_for_selector(".po-menu-item", timeout=self.config.timeout_ms)
         except PlaywrightTimeoutError as exc:
-            raise TotvsAutomationError("Tempo esgotado aguardando abertura do painel da empresa.") from exc
+            raise TotvsAutomationError("Tempo esgotado ao carregar os dados da empresa.") from exc
 
         page.wait_for_timeout(1500)
         self._dismiss_popups(page)
 
     def _navigate_geral_empresa(self, page: Page) -> None:
-        self.log("Navegando no menu lateral esquerdo: Geral > Empresa ...")
+        self.log("Acessando configurações fiscais da empresa (Geral > Empresa)...")
         self._dismiss_popups(page)
 
         geral_menu = page.locator(".po-menu-item:has-text('Geral')").first
@@ -194,7 +190,7 @@ class TotvsCertUploader:
             geral_menu.wait_for(state="visible", timeout=self.config.timeout_ms)
             geral_menu.click()
         except PlaywrightTimeoutError as exc:
-            raise TotvsAutomationError("Menu lateral 'Geral' não encontrado.") from exc
+            raise TotvsAutomationError("Menu 'Geral' não encontrado no painel da empresa.") from exc
 
         page.wait_for_timeout(800)
 
@@ -205,13 +201,13 @@ class TotvsCertUploader:
             empresa_menu.wait_for(state="visible", timeout=self.config.timeout_ms)
             empresa_menu.click()
         except PlaywrightTimeoutError as exc:
-            raise TotvsAutomationError("Submenu 'Empresa' (dentro de Geral) não encontrado.") from exc
+            raise TotvsAutomationError("Submenu 'Empresa' não encontrado.") from exc
 
         page.wait_for_timeout(2000)
         self._dismiss_popups(page)
 
     def _upload_certificate(self, page: Page, cert_path: str, cert_password: str) -> str:
-        self.log("Procurando e clicando no botão 'Enviar Certificado'...")
+        self.log("Iniciando envio do certificado digital...")
         enviar_btn = page.locator(
             "button:has-text('Enviar Certificado'), button:has-text('Enviar certificado')"
         ).first
@@ -219,12 +215,10 @@ class TotvsCertUploader:
             enviar_btn.wait_for(state="visible", timeout=self.config.timeout_ms)
             enviar_btn.click()
         except PlaywrightTimeoutError as exc:
-            raise TotvsAutomationError("Botão 'Enviar Certificado' não encontrado no painel da Empresa.") from exc
+            raise TotvsAutomationError("Opção 'Enviar Certificado' não encontrada.") from exc
 
         page.wait_for_timeout(1500)
 
-        # Preenche a senha do certificado na tela de upload (/general/company/certificate)
-        self.log("Digitando a senha do certificado digital...")
         pwd_input = page.locator(
             "input[type='password'][name='password'], input[id^='po-password'], input[type='password']"
         ).first
@@ -233,10 +227,9 @@ class TotvsCertUploader:
             pwd_input.click()
             pwd_input.fill(cert_password)
         except PlaywrightTimeoutError as exc:
-            raise TotvsAutomationError("Campo de senha do certificado não encontrado.") from exc
+            raise TotvsAutomationError("Campo de senha do certificado não disponível.") from exc
 
-        # Seleciona o arquivo clicando em 'Selecionar arquivo' (ou definindo no input[type='file'][name='upload'])
-        self.log(f"Selecionando o arquivo '{Path(cert_path).name}'...")
+        self.log(f"Anexando arquivo '{Path(cert_path).name}' e salvando...")
         file_attached = False
         select_file_btn = page.locator("button:has-text('Selecionar arquivo')").first
 
@@ -260,17 +253,14 @@ class TotvsCertUploader:
 
         page.wait_for_timeout(1000)
 
-        # Clica em Salvar
-        self.log("Clicando em 'Salvar'...")
         salvar_btn = page.get_by_role("button", name="Salvar", exact=True)
         try:
             salvar_btn.wait_for(state="visible", timeout=5000)
             salvar_btn.click()
         except PlaywrightTimeoutError as exc:
-            raise TotvsAutomationError("Botão 'Salvar' não encontrado na tela de certificado.") from exc
+            raise TotvsAutomationError("Botão 'Salvar' não encontrado.") from exc
 
-        # Aguarda o aviso de sucesso ou falha emitido pelo site (po-toaster / notificação)
-        self.log("Aguardando aviso de confirmação da plataforma TOTVS...")
+        self.log("Aguardando confirmação de salvamento da plataforma...")
         toast_selectors = (
             ".po-toaster, po-toaster, .po-notification, .toast-message, "
             "[role='alert'], .po-field-container-bottom-text-error"
@@ -296,65 +286,49 @@ class TotvsCertUploader:
                 except Exception:
                     pass
 
-            # Se redirecionou de volta para /general/company (saiu de /certificate/), salvou com sucesso!
             if "/general/company" in page.url and "/certificate" not in page.url:
-                return "Certificado salvo com sucesso na plataforma!"
+                return "Certificado salvo com sucesso!"
 
             page.wait_for_timeout(400)
 
-        raise TotvsAutomationError("O site não confirmou o salvamento do certificado (verifique se a senha ou o CNPJ correspondem à empresa).")
+        raise TotvsAutomationError("A plataforma não confirmou o salvamento (verifique se o certificado pertence a esta empresa).")
 
     def run_upload(self, cnpj: str, cert_path: str, cert_password: str) -> str:
         with sync_playwright() as p:
-            launch_args = ["--disable-blink-features=AutomationControlled"]
+            # Sempre abre em sessão anônima na memória (new_context) e oculta em segundo plano (headless=True)
+            launch_args = [
+                "--incognito",
+                "--disable-blink-features=AutomationControlled",
+                "--no-first-run",
+                "--no-default-browser-check",
+                "--disable-extensions",
+            ]
             context: Optional[BrowserContext] = None
             browser = None
             try:
-                if self.config.persist_session:
-                    self.user_data_dir.mkdir(parents=True, exist_ok=True)
-                    try:
-                        context = p.chromium.launch_persistent_context(
-                            user_data_dir=str(self.user_data_dir),
-                            channel="chrome",
-                            headless=self.config.headless,
-                            user_agent=USER_AGENT,
-                            args=launch_args,
-                            viewport={"width": 1366, "height": 768},
-                        )
-                    except Exception:
-                        context = p.chromium.launch_persistent_context(
-                            user_data_dir=str(self.user_data_dir),
-                            channel="msedge",
-                            headless=self.config.headless,
-                            user_agent=USER_AGENT,
-                            args=launch_args,
-                            viewport={"width": 1366, "height": 768},
-                        )
-                    page = context.pages[0] if context.pages else context.new_page()
-                else:
-                    try:
-                        browser = p.chromium.launch(
-                            channel="chrome",
-                            headless=self.config.headless,
-                            args=launch_args,
-                        )
-                    except Exception:
-                        browser = p.chromium.launch(
-                            channel="msedge",
-                            headless=self.config.headless,
-                            args=launch_args,
-                        )
-                    context = browser.new_context(
-                        user_agent=USER_AGENT,
-                        viewport={"width": 1366, "height": 768},
+                try:
+                    browser = p.chromium.launch(
+                        channel="chrome",
+                        headless=True,
+                        args=launch_args,
                     )
-                    page = context.new_page()
+                except Exception:
+                    browser = p.chromium.launch(
+                        channel="msedge",
+                        headless=True,
+                        args=launch_args,
+                    )
+                context = browser.new_context(
+                    user_agent=USER_AGENT,
+                    viewport={"width": 1366, "height": 768},
+                )
+                page = context.new_page()
 
                 self._ensure_logged_in_and_on_tenant_screen(page)
                 self._search_and_access_company(page, cnpj)
                 self._navigate_geral_empresa(page)
                 result_msg = self._upload_certificate(page, cert_path, cert_password)
-                self.log(f"Aviso do site: {result_msg}")
+                self.log("Concluído! Sessão anônima encerrada com segurança.")
                 return result_msg
             finally:
                 try:
