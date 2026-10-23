@@ -8,11 +8,9 @@ __pycache__/
 # Build / PyInstaller
 build/
 dist/
-*.spec
 
 # Dados sensíveis locais e sessão de navegador
 config.json
-_secrets.py
 .browser_profile/
 *.pfx
 *.p12
