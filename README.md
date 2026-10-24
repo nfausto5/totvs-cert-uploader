@@ -1,6 +1,17 @@
 # TOTVS Cert Uploader (NFe / NFCe)
 
-Aplicativo Desktop em Python (`CustomTkinter` + `Playwright` + `cryptography`) voltado para o **cliente final** realizar a leitura, validação local e envio automatizado do seu certificado digital A1 (`.pfx` / `.p12`) em segundo plano.
+Aplicativo Desktop em Python (`CustomTkinter` + `Playwright` + `cryptography`) para leitura, validação local e envio automatizado de certificado digital A1 (`.pfx` / `.p12`) no portal TEC da TOTVS Hospitalidade.
+
+---
+
+## Versões Disponíveis (Versionamento Semântico)
+
+As duas versões estão disponíveis (código-fonte e executável `.exe`) na aba [**Releases**](https://github.com/nfausto5/totvs-cert-uploader/releases):
+
+| Versão | Executável (`.exe`) | Código-Fonte | Descrição |
+| :--- | :--- | :--- | :--- |
+| **`v1.0.0`** | `TOTVS-Cert-Uploader-v1.0.0.exe` | [Tag `v1.0.0`](https://github.com/nfausto5/totvs-cert-uploader/tree/v1.0.0) | **Com Login e Senha no Portal TEC**: Aparece na interface o painel com os campos de usuário, senha e URL do portal TEC (além da opção de mostrar/ocultar o navegador). Ideal para uso técnico ou troca manual de credenciais. |
+| **`v2.0.0`** | `TOTVS-Cert-Uploader-v2.0.0.exe` | [Tag `v2.0.0`](https://github.com/nfausto5/totvs-cert-uploader/tree/v2.0.0) | **Sem Login e Senha no Portal TEC (Cliente Final)**: Não aparece nenhum campo de login ou senha do portal TEC na interface. As credenciais vão embutidas internamente e a execução ocorre 100% oculta em segundo plano. |
 
 ---
 
