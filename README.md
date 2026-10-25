@@ -4,7 +4,7 @@ Aplicativo Desktop em Python (`CustomTkinter` + `Playwright` + `cryptography`) p
 
 ---
 
-## Versões Disponíveis (Versionamento Semântico)
+## Versões Disponíveis
 
 As duas versões estão disponíveis (código-fonte e executável `.exe`) na aba [**Releases**](https://github.com/nfausto5/totvs-cert-uploader/releases):
 
